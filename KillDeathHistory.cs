@@ -6,23 +6,23 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("KillDeathHistory", "Gregg", "1.1.2")]
-    [Description("Displays kill/death history in a UI list")]
+    [Info("KillDeathHistory", "Gregg", "1.3.0")]
+    [Description("Records PVP kill/death history and displays it in a UI")]
     public class KillDeathHistory : RustPlugin
     {
-        #region Data
+        #region Data Models
 
         class KDEntry
         {
-            public string Type;
-            public string OtherPlayer;
+            public string Type;        // Kill or Death
+            public string OtherPlayer; // Victim or Killer
             public string Weapon;
             public string Time;
         }
 
         Dictionary<ulong, List<KDEntry>> History;
-        const string UIName = "KDH_UI";
 
+        const string UIName = "KDH_UI";
         int MaxEntries = 20;
 
         #endregion
@@ -43,61 +43,80 @@ namespace Oxide.Plugins
         }
 
         void OnPlayerDeath(BasePlayer victim, HitInfo info)
-		{
-			if (victim == null || info == null) return;
+        {
+            if (victim == null || info == null)
+                return;
 
-			BasePlayer attacker = info.InitiatorPlayer;
-			string weapon = info?.Weapon?.GetItem()?.info?.displayName?.english ?? "Unknown";
-			string time = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            BasePlayer attacker = info.InitiatorPlayer;
 
-			AddEntry(victim.userID, new KDEntry
-			{
-				Type = "Death",
-				OtherPlayer = attacker != null ? attacker.displayName : "Environment",
-				Weapon = weapon,
-				Time = time
-			});
+            // ✅ ONLY record PLAYER vs PLAYER
+            if (attacker == null || attacker.userID == victim.userID)
+                return;
 
-			if (attacker != null && attacker.userID != victim.userID)
-			{
-				AddEntry(attacker.userID, new KDEntry
-				{
-					Type = "Kill",
-					OtherPlayer = victim.displayName,
-					Weapon = weapon,
-					Time = time
-				});
-			}
+            string weapon = info?.Weapon?.GetItem()?.info?.displayName?.english ?? "Unknown";
+            string time = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
-			SaveData();
-		}
+            // Record victim death
+            AddEntry(victim.userID, new KDEntry
+            {
+                Type = "Death",
+                OtherPlayer = attacker.displayName,
+                Weapon = weapon,
+                Time = time
+            });
 
+            // Record attacker kill
+            AddEntry(attacker.userID, new KDEntry
+            {
+                Type = "Kill",
+                OtherPlayer = victim.displayName,
+                Weapon = weapon,
+                Time = time
+            });
+
+            SaveData();
+        }
 
         #endregion
 
         #region Commands
 
         [ChatCommand("kdh")]
-		void CmdKDH(BasePlayer player, string command, string[] args)
-		{
-			if (player == null) return;
+        void CmdKDH(BasePlayer player, string command, string[] args)
+        {
+            if (player == null) return;
 
-			DestroyUI(player); // always clear first
-			DrawUI(player);
-		}
+            BasePlayer target = player;
 
+            if (args.Length > 0)
+            {
+                if (!player.IsAdmin)
+                {
+                    player.ChatMessage("❌ You don't have permission.");
+                    return;
+                }
+
+                target = FindPlayer(args[0]);
+                if (target == null)
+                {
+                    player.ChatMessage("❌ Player not found.");
+                    return;
+                }
+            }
+
+            DrawUI(player, target);
+        }
 
         #endregion
 
         #region UI
 
-        void DrawUI(BasePlayer player)
+        void DrawUI(BasePlayer viewer, BasePlayer target)
         {
-            DestroyUI(player);
+            DestroyUI(viewer);
 
             var container = new CuiElementContainer();
 
-            // Background
             container.Add(new CuiPanel
             {
                 Image = { Color = "0 0 0 0.85" },
@@ -105,19 +124,17 @@ namespace Oxide.Plugins
                 CursorEnabled = true
             }, "Overlay", UIName);
 
-            // Title
             container.Add(new CuiLabel
             {
                 Text =
                 {
-                    Text = "Kill / Death History",
+                    Text = $"Kill / Death History - {target.displayName}",
                     FontSize = 20,
                     Align = TextAnchor.MiddleCenter
                 },
                 RectTransform = { AnchorMin = "0 0.92", AnchorMax = "1 1" }
             }, UIName);
 
-            // Close button
             container.Add(new CuiButton
             {
                 Button = { Color = "0.8 0.2 0.2 1", Close = UIName },
@@ -128,13 +145,15 @@ namespace Oxide.Plugins
             float y = 0.85f;
             float step = 0.05f;
 
-            if (History.ContainsKey(player.userID))
+            if (History.ContainsKey(target.userID) && History[target.userID].Count > 0)
             {
-                foreach (var entry in History[player.userID])
+                foreach (var entry in History[target.userID])
                 {
                     if (y < 0.05f) break;
 
-                    string color = entry.Type == "Kill" ? "0.3 0.8 0.3 1" : "0.8 0.3 0.3 1";
+                    string color = entry.Type == "Kill"
+                        ? "0.3 0.8 0.3 1"
+                        : "0.8 0.3 0.3 1";
 
                     container.Add(new CuiLabel
                     {
@@ -161,7 +180,7 @@ namespace Oxide.Plugins
                 {
                     Text =
                     {
-                        Text = "No history available.",
+                        Text = "No PVP kill/death history.",
                         FontSize = 14,
                         Align = TextAnchor.MiddleCenter
                     },
@@ -169,7 +188,7 @@ namespace Oxide.Plugins
                 }, UIName);
             }
 
-            CuiHelper.AddUi(player, container);
+            CuiHelper.AddUi(viewer, container);
         }
 
         void DestroyUI(BasePlayer player)
@@ -181,15 +200,28 @@ namespace Oxide.Plugins
 
         #region Helpers
 
-        void AddEntry(ulong id, KDEntry entry)
+        void AddEntry(ulong userId, KDEntry entry)
         {
-            if (!History.ContainsKey(id))
-                History[id] = new List<KDEntry>();
+            if (!History.ContainsKey(userId))
+                History[userId] = new List<KDEntry>();
 
-            History[id].Insert(0, entry);
+            History[userId].Insert(0, entry);
 
-            if (History[id].Count > MaxEntries)
-                History[id].RemoveAt(History[id].Count - 1);
+            if (History[userId].Count > MaxEntries)
+                History[userId].RemoveAt(History[userId].Count - 1);
+        }
+
+        BasePlayer FindPlayer(string nameOrId)
+        {
+            foreach (var player in BasePlayer.activePlayerList)
+            {
+                if (player.UserIDString == nameOrId)
+                    return player;
+
+                if (player.displayName.IndexOf(nameOrId, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return player;
+            }
+            return null;
         }
 
         #endregion
